@@ -1,0 +1,495 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Phaser 3 Athletic Run Game</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #050505;
+            overflow: hidden;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            color: white;
+            font-family: Arial, sans-serif;
+        }
+        canvas {
+            display: block;
+            box-shadow: 0 0 20px rgba(255, 0, 0, 0.2);
+        }
+    </style>
+    <!-- Phaser 3 CDN -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/phaser/3.60.0/phaser.min.js"></script>
+</head>
+<body>
+
+<script>
+/**
+ * 簡易サウンドマネージャー（Web Audio API）
+ * 外部アセットなしで音を生成します
+ */
+const SoundManager = {
+    ctx: null,
+    init: function() {
+        window.AudioContext = window.AudioContext || window.webkitAudioContext;
+        this.ctx = new AudioContext();
+    },
+    playJump: function() {
+        if (!this.ctx) return;
+        const osc = this.ctx.createOscillator();
+        const gain = this.ctx.createGain();
+        osc.connect(gain);
+        gain.connect(this.ctx.destination);
+        
+        osc.type = 'square';
+        osc.frequency.setValueAtTime(150, this.ctx.currentTime);
+        osc.frequency.exponentialRampToValueAtTime(600, this.ctx.currentTime + 0.1);
+        
+        gain.gain.setValueAtTime(0.1, this.ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.01, this.ctx.currentTime + 0.1);
+        
+        osc.start();
+        osc.stop(this.ctx.currentTime + 0.1);
+    },
+    playDamage: function() {
+        if (!this.ctx) return;
+        const osc = this.ctx.createOscillator();
+        const gain = this.ctx.createGain();
+        osc.connect(gain);
+        gain.connect(this.ctx.destination);
+        
+        osc.type = 'sawtooth';
+        osc.frequency.setValueAtTime(100, this.ctx.currentTime);
+        osc.frequency.exponentialRampToValueAtTime(10, this.ctx.currentTime + 0.5);
+        
+        gain.gain.setValueAtTime(0.2, this.ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.01, this.ctx.currentTime + 0.5);
+        
+        osc.start();
+        osc.stop(this.ctx.currentTime + 0.5);
+    },
+    resume: function() {
+        if (this.ctx && this.ctx.state === 'suspended') {
+            this.ctx.resume();
+        }
+    }
+};
+
+/**
+ * ゲーム設定
+ */
+const CONFIG = {
+    PLAYER_SPEED: 350,
+    JUMP_POWER: 550,
+    GRAVITY: 1200,
+    WALL_SPEED: 355,    // プレイヤーよりごく僅かに速く設定（圧迫感）
+    WALL_START_X: -400,
+    SPAWN_BUFFER: 1400,
+};
+
+class MainScene extends Phaser.Scene {
+    constructor() {
+        super({ key: 'MainScene' });
+    }
+
+    preload() {
+        // --- テクスチャ生成 ---
+        
+        // 1. プレイヤー (走る棒人間)
+        this.createPlayerTexture();
+
+        // 2. 地面 (少しサイバーな雰囲気)
+        const ground = this.make.graphics({x:0, y:0, add:false});
+        ground.fillStyle(0x222222, 1);
+        ground.fillRect(0, 0, 32, 32);
+        ground.lineStyle(2, 0x00ff00, 1); // ネオングリーン
+        ground.strokeRect(0, 0, 32, 32);
+        ground.generateTexture('ground', 32, 32);
+
+        // 3. トゲ
+        const spike = this.make.graphics({x:0, y:0, add:false});
+        spike.fillStyle(0xff0055, 1);
+        spike.beginPath();
+        spike.moveTo(0, 32);
+        spike.lineTo(16, 0);
+        spike.lineTo(32, 32);
+        spike.fillPath();
+        spike.generateTexture('spike', 32, 32);
+
+        // 4. 動く敵 (パトロールする敵)
+        const enemy = this.make.graphics({x:0, y:0, add:false});
+        enemy.fillStyle(0xaa00aa, 1); // 紫
+        enemy.fillCircle(16, 16, 16);
+        enemy.fillStyle(0xffffff, 1);
+        enemy.fillCircle(10, 10, 4); // 目
+        enemy.fillCircle(22, 10, 4);
+        enemy.generateTexture('enemy', 32, 32);
+
+        // 5. 死の壁のパーティクル用
+        const p = this.make.graphics({x:0, y:0, add:false});
+        p.fillStyle(0xff0000, 1);
+        p.fillCircle(4, 4, 4);
+        p.generateTexture('redParticle', 8, 8);
+    }
+
+    createPlayerTexture() {
+        // 走るアニメーション用テクスチャ2種
+        [1, 2].forEach(i => {
+            const g = this.make.graphics({x:0, y:0, add:false});
+            g.lineStyle(3, 0xffffff, 1);
+            g.fillStyle(0xffccaa, 1); 
+            // 頭
+            g.fillCircle(16, 8, 7);
+            // 体
+            g.beginPath();
+            g.moveTo(16, 15);
+            g.lineTo(16, 30);
+            g.strokePath();
+            // 手足 (フレームで変える)
+            g.beginPath();
+            if(i===1) {
+                g.moveTo(16, 20); g.lineTo(6, 25);  // 左手
+                g.moveTo(16, 20); g.lineTo(26, 15); // 右手
+                g.moveTo(16, 30); g.lineTo(6, 40);  // 左足
+                g.moveTo(16, 30); g.lineTo(26, 35); // 右足
+            } else {
+                g.moveTo(16, 20); g.lineTo(6, 15);
+                g.moveTo(16, 20); g.lineTo(26, 25);
+                g.moveTo(16, 30); g.lineTo(10, 35);
+                g.moveTo(16, 30); g.lineTo(22, 45);
+            }
+            g.strokePath();
+            g.generateTexture(`player_run${i}`, 32, 48);
+        });
+    }
+
+    create() {
+        // --- サウンド初期化 ---
+        SoundManager.init();
+        // 初回クリックでAudioContextをResumeするイベント設定
+        this.input.once('pointerdown', () => SoundManager.resume());
+        this.input.keyboard.once('keydown', () => SoundManager.resume());
+
+        // --- 変数初期化 ---
+        this.gameOver = false;
+        this.nextSpawnX = 0;
+        this.jumps = 0;
+        this.lastGroundY = 400; // 前の地面の高さを記録（無理な生成防止用）
+
+        // ハイスコア読み込み
+        this.highScore = parseInt(localStorage.getItem('phaser_run_highscore')) || 0;
+
+        // --- 背景 ---
+        this.cameras.main.setBackgroundColor('#101015'); // 暗い宇宙っぽい色
+
+        // --- アニメーション ---
+        this.anims.create({
+            key: 'run',
+            frames: [ { key: 'player_run1' }, { key: 'player_run2' } ],
+            frameRate: 8,
+            repeat: -1
+        });
+
+        // --- グループ ---
+        this.platforms = this.physics.add.staticGroup();
+        this.spikes = this.physics.add.staticGroup();
+        this.enemies = this.physics.add.group({
+            allowGravity: true,
+            immovable: false
+        });
+
+        // --- プレイヤー ---
+        this.player = this.physics.add.sprite(100, 200, 'player_run1');
+        this.player.play('run');
+        this.player.setGravityY(CONFIG.GRAVITY);
+        this.player.body.setSize(20, 44); // 当たり判定調整
+        
+        // --- 死の壁（パーティクルエフェクト付き） ---
+        // 壁の実体（見えない壁として判定用）
+        this.deathWall = this.physics.add.image(CONFIG.WALL_START_X, 300, 'redParticle');
+        this.deathWall.setVisible(false); // 本体は見せない
+        this.deathWall.body.allowGravity = false;
+        this.deathWall.setImmovable(true);
+        this.deathWall.setVelocityX(CONFIG.WALL_SPEED);
+        this.deathWall.body.setSize(100, 2000); // 巨大な壁
+
+        // 壁の見た目（パーティクル）
+        this.wallParticles = this.add.particles(0, 0, 'redParticle', {
+            speed: { min: 100, max: 200 },
+            angle: { min: -45, max: 45 },
+            scale: { start: 4, end: 0 },
+            alpha: { start: 0.8, end: 0 },
+            lifespan: 1000,
+            blendMode: 'ADD',
+            frequency: 20,
+            quantity: 5,
+            emitZone: { type: 'random', source: new Phaser.Geom.Rectangle(0, -500, 20, 1000) }
+        });
+        this.wallParticles.startFollow(this.deathWall);
+
+        // --- カメラ ---
+        this.cameras.main.startFollow(this.player, true, 0.1, 0.1);
+        this.cameras.main.setDeadzone(100, 0);
+
+        // --- 初期地形 ---
+        this.createGround(0, 1000, 400); // スタート地点
+        this.nextSpawnX = 1000;
+        this.lastGroundY = 400;
+
+        // --- 衝突設定 ---
+        this.physics.add.collider(this.player, this.platforms, this.resetJumpCount, null, this);
+        this.physics.add.collider(this.enemies, this.platforms); // 敵も地面に乗る
+
+        // 死亡判定
+        this.physics.add.overlap(this.player, this.deathWall, this.hitTraps, null, this);
+        this.physics.add.collider(this.player, this.spikes, this.hitTraps, null, this);
+        this.physics.add.overlap(this.player, this.enemies, this.hitTraps, null, this);
+
+        // --- UI ---
+        this.scoreText = this.add.text(16, 16, 'DIST: 0m', {
+            fontSize: '20px', fill: '#fff', stroke: '#000', strokeThickness: 4
+        }).setScrollFactor(0).setDepth(100);
+
+        this.highScoreText = this.add.text(16, 40, `HIGH: ${this.highScore}m`, {
+            fontSize: '20px', fill: '#ffff00', stroke: '#000', strokeThickness: 4
+        }).setScrollFactor(0).setDepth(100);
+
+        this.statusText = this.add.text(400, 225, '', {
+            fontSize: '40px', fill: '#ff0000', stroke: '#fff', strokeThickness: 6, align: 'center'
+        }).setOrigin(0.5).setScrollFactor(0).setDepth(100);
+
+        // --- 入力 ---
+        this.input.on('pointerdown', this.jump, this);
+        this.input.on('pointerup', this.cutJump, this);
+        this.input.keyboard.on('keydown-SPACE', this.jump, this);
+        this.input.keyboard.on('keyup-SPACE', this.cutJump, this);
+    }
+
+    update() {
+        if (this.gameOver) return;
+
+        // プレイヤー移動
+        this.player.setVelocityX(CONFIG.PLAYER_SPEED);
+        // 壁移動
+        this.deathWall.setVelocityX(CONFIG.WALL_SPEED);
+
+        // 天井に頭をぶつけた時の修正
+        // ブロックされた瞬間、上昇速度を殺す（「頭ぶつけても飛べる」対策）
+        if (this.player.body.blocked.up) {
+            this.player.setVelocityY(100); // 少し跳ね返る
+        }
+
+        // 敵の移動ロジック
+        this.enemies.children.iterate((enemy) => {
+            if (enemy) {
+                // 足場から落ちそうになったら反転
+                // 簡易実装: 一定距離で往復させる
+                if (enemy.body.blocked.left) {
+                    enemy.setVelocityX(100);
+                } else if (enemy.body.blocked.right) {
+                    enemy.setVelocityX(-100);
+                }
+                // 足場端でのターン（レイキャストがないので、生成時に移動範囲を決める方が安全だが簡易的に）
+                // ここではシンプルに生成時に速度を与え、壁に当たると反転するようにしています
+            }
+        });
+
+        // 地形生成
+        const cameraRight = this.cameras.main.scrollX + this.cameras.main.width;
+        if (this.nextSpawnX < cameraRight + CONFIG.SPAWN_BUFFER) {
+            this.generateLevelChunk();
+        }
+
+        // 落下死
+        if (this.player.y > this.sys.canvas.height + 200) {
+            this.hitTraps();
+        }
+
+        // スコア更新
+        const currentDist = Math.floor(this.player.x / 10);
+        this.scoreText.setText(`DIST: ${currentDist}m`);
+
+        this.cleanupObjects();
+    }
+
+    jump() {
+        if (this.gameOver) return;
+        SoundManager.resume();
+
+        // 接地している or 2段ジャンプ権がある
+        // かつ、頭をぶつけている最中ではない（blocked.upチェック）
+        if ((this.player.body.touching.down || this.jumps < 2) && !this.player.body.blocked.up) {
+            this.player.setVelocityY(-CONFIG.JUMP_POWER);
+            this.jumps++;
+            SoundManager.playJump();
+        }
+    }
+
+    cutJump() {
+        // ジャンプ上昇中にボタンを離したら減速
+        if (this.player.body.velocity.y < 0) {
+            this.player.setVelocityY(this.player.body.velocity.y * 0.5);
+        }
+    }
+
+    resetJumpCount() {
+        this.jumps = 0;
+    }
+
+    generateLevelChunk() {
+        const dist = this.player.x;
+        let difficulty = 0; // 0:Easy, 1:Normal, 2:Hard
+        if (dist > 5000) difficulty = 2;
+        else if (dist > 2000) difficulty = 1;
+
+        // --- 高さの決定ロジック（無理な地形防止） ---
+        // ジャンプ力から計算した到達可能高さは約150px程度（2段ジャンプ込みだともっといけるが、安全策を取る）
+        const maxUp = 120; 
+        const maxDown = 300; // 下りる分にはある程度深くてもOK
+        
+        // 画面外に出ない範囲で制限
+        const minY = 150;
+        const maxY = 500;
+
+        let minTarget = Math.max(minY, this.lastGroundY - maxUp);
+        let maxTarget = Math.min(maxY, this.lastGroundY + maxDown);
+        
+        let y = Phaser.Math.Between(minTarget, maxTarget);
+        
+        // 幅
+        let width = Phaser.Math.Between(300, 800);
+        if (difficulty > 1) width = Phaser.Math.Between(200, 600); // 難易度高いと足場が狭い
+
+        // 穴のサイズ（前の足場との高低差を考慮）
+        let gap = 0;
+        if (difficulty > 0) {
+            // 前の足場より高い位置に行くなら、穴は小さくしないと届かない
+            const heightDiff = this.lastGroundY - y; // 正なら登り
+            let maxGap = 200;
+            if (heightDiff > 50) maxGap = 120; // かなり登るなら穴は狭く
+            if (heightDiff > 100) maxGap = 80; // 急勾配
+            
+            gap = Phaser.Math.Between(60, maxGap);
+        }
+
+        // 生成
+        this.createGround(this.nextSpawnX, width, y);
+        this.lastGroundY = y; // 更新
+
+        // ギミック配置
+        if (difficulty > 0) {
+            const seed = Math.random();
+            // トゲ配置
+            if (seed < 0.4) {
+                this.createSpikes(this.nextSpawnX, width, y);
+            }
+            // 動く敵配置 (Normal以上かつ、足場がそこそこ広い場合)
+            else if (seed > 0.7 && width > 300) {
+                this.createEnemy(this.nextSpawnX, width, y);
+            }
+        }
+
+        this.nextSpawnX += width + gap;
+    }
+
+    createGround(startX, width, y) {
+        const ground = this.platforms.create(startX + width / 2, y + 16, 'ground');
+        ground.displayWidth = width;
+        ground.displayHeight = 32;
+        ground.refreshBody();
+    }
+
+    createSpikes(startX, width, y) {
+        if (width < 200) return;
+        const spikeX = Phaser.Math.Between(startX + 60, startX + width - 60);
+        const spike = this.spikes.create(spikeX, y - 16, 'spike');
+        spike.body.setSize(16, 16);
+        spike.body.setOffset(8, 16);
+    }
+
+    createEnemy(startX, width, y) {
+        const ex = startX + width / 2;
+        const enemy = this.enemies.create(ex, y - 32, 'enemy');
+        enemy.setBounce(1);
+        enemy.setCollideWorldBounds(false);
+        enemy.setVelocityX(100); // 初期速度
+        enemy.setGravityY(CONFIG.GRAVITY);
+        
+        // 敵の移動範囲を制限するためのカスタムプロパティ（簡易AI用）
+        enemy.startX = startX;
+        enemy.endX = startX + width;
+        
+        // Updateループ内で制御するためにイベントリスナーっぽく処理を追加
+        // PhaserのPhysics Group updateを使う手もあるが、今回はMainScene.updateで処理
+    }
+
+    cleanupObjects() {
+        const killLine = this.cameras.main.scrollX - 1000;
+        const groups = [this.platforms, this.spikes, this.enemies];
+        
+        groups.forEach(group => {
+            group.children.iterate(child => {
+                if (child && child.x < killLine) {
+                    child.destroy();
+                }
+            });
+        });
+    }
+
+    hitTraps() {
+        if (this.gameOver) return;
+
+        this.gameOver = true;
+        SoundManager.playDamage(); // 音を鳴らす
+
+        this.player.setTint(0x555555);
+        this.player.anims.stop();
+        this.player.setVelocity(0, -200); // 少し浮いて倒れる演出
+        this.physics.pause();
+        this.deathWall.setVelocity(0);
+        this.wallParticles.pause(); // パーティクル停止
+
+        // ハイスコア保存
+        const currentDist = Math.floor(this.player.x / 10);
+        if (currentDist > this.highScore) {
+            this.highScore = currentDist;
+            localStorage.setItem('phaser_run_highscore', this.highScore);
+            this.statusText.setText(`NEW RECORD!\n${currentDist}m\n\nTap to Restart`);
+        } else {
+            this.statusText.setText(`GAME OVER\nSCORE: ${currentDist}m\n\nTap to Restart`);
+        }
+        
+        this.time.delayedCall(800, () => {
+            this.input.once('pointerdown', () => this.scene.restart());
+            this.input.keyboard.once('keydown-SPACE', () => this.scene.restart());
+        });
+    }
+}
+
+const config = {
+    type: Phaser.AUTO,
+    scale: {
+        mode: Phaser.Scale.FIT,
+        autoCenter: Phaser.Scale.CENTER_BOTH,
+        width: 800,
+        height: 450
+    },
+    physics: {
+        default: 'arcade',
+        arcade: {
+            gravity: { y: CONFIG.GRAVITY },
+            debug: false
+        }
+    },
+    scene: MainScene
+};
+
+const game = new Phaser.Game(config);
+
+</script>
+</body>
+</html>
