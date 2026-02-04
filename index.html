@@ -21,16 +21,28 @@
             display: block;
             box-shadow: 0 0 20px rgba(255, 0, 0, 0.2);
         }
+        #danger-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: radial-gradient(circle, transparent 50%, rgba(255,0,0,0.5) 100%);
+            pointer-events: none;
+            opacity: 0;
+            transition: opacity 0.2s;
+            z-index: 10;
+        }
     </style>
-    <!-- Phaser 3 CDN -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/phaser/3.60.0/phaser.min.js"></script>
 </head>
 <body>
 
+<div id="danger-overlay"></div>
+
 <script>
 /**
- * 簡易サウンドマネージャー（Web Audio API）
- * 外部アセットなしで音を生成します
+ * サウンドマネージャー
  */
 const SoundManager = {
     ctx: null,
@@ -38,45 +50,30 @@ const SoundManager = {
         window.AudioContext = window.AudioContext || window.webkitAudioContext;
         this.ctx = new AudioContext();
     },
-    playJump: function() {
+    playJump: function() { this.playSound('square', 150, 600, 0.1, 0.1); },
+    playDamage: function() { 
+        this.playSound('sawtooth', 150, 50, 0.3, 0.2);
+        setTimeout(() => this.playSound('sine', 800, 400, 0.1, 0.3), 100);
+    },
+    playSpring: function() { this.playSound('sine', 300, 800, 0.1, 0.3); },
+    playCrumble: function() { this.playSound('square', 100, 50, 0.1, 0.2); },
+    playCoin: function() { this.playSound('sine', 1000, 2000, 0.1, 0.1); }, // コイン音
+    playGameOver: function() { this.playSound('sawtooth', 500, 50, 0.5, 1.0); },
+    playSound: function(type, startFreq, endFreq, volume, duration) {
         if (!this.ctx) return;
         const osc = this.ctx.createOscillator();
         const gain = this.ctx.createGain();
         osc.connect(gain);
         gain.connect(this.ctx.destination);
-        
-        osc.type = 'square';
-        osc.frequency.setValueAtTime(150, this.ctx.currentTime);
-        osc.frequency.exponentialRampToValueAtTime(600, this.ctx.currentTime + 0.1);
-        
-        gain.gain.setValueAtTime(0.1, this.ctx.currentTime);
-        gain.gain.exponentialRampToValueAtTime(0.01, this.ctx.currentTime + 0.1);
-        
+        osc.type = type;
+        osc.frequency.setValueAtTime(startFreq, this.ctx.currentTime);
+        osc.frequency.exponentialRampToValueAtTime(endFreq, this.ctx.currentTime + duration);
+        gain.gain.setValueAtTime(volume, this.ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.01, this.ctx.currentTime + duration);
         osc.start();
-        osc.stop(this.ctx.currentTime + 0.1);
+        osc.stop(this.ctx.currentTime + duration);
     },
-    playDamage: function() {
-        if (!this.ctx) return;
-        const osc = this.ctx.createOscillator();
-        const gain = this.ctx.createGain();
-        osc.connect(gain);
-        gain.connect(this.ctx.destination);
-        
-        osc.type = 'sawtooth';
-        osc.frequency.setValueAtTime(100, this.ctx.currentTime);
-        osc.frequency.exponentialRampToValueAtTime(10, this.ctx.currentTime + 0.5);
-        
-        gain.gain.setValueAtTime(0.2, this.ctx.currentTime);
-        gain.gain.exponentialRampToValueAtTime(0.01, this.ctx.currentTime + 0.5);
-        
-        osc.start();
-        osc.stop(this.ctx.currentTime + 0.5);
-    },
-    resume: function() {
-        if (this.ctx && this.ctx.state === 'suspended') {
-            this.ctx.resume();
-        }
-    }
+    resume: function() { if (this.ctx && this.ctx.state === 'suspended') this.ctx.resume(); }
 };
 
 /**
@@ -85,10 +82,12 @@ const SoundManager = {
 const CONFIG = {
     PLAYER_SPEED: 350,
     JUMP_POWER: 550,
+    HIGH_JUMP_POWER: 850,
     GRAVITY: 1200,
-    WALL_SPEED: 355,    // プレイヤーよりごく僅かに速く設定（圧迫感）
-    WALL_START_X: -400,
-    SPAWN_BUFFER: 1400,
+    WALL_SPEED: 350,
+    WALL_START_X: -500,
+    SPAWN_BUFFER: 3000,
+    STUN_TIME: 800,
 };
 
 class MainScene extends Phaser.Scene {
@@ -97,70 +96,94 @@ class MainScene extends Phaser.Scene {
     }
 
     preload() {
-        // --- テクスチャ生成 ---
-        
-        // 1. プレイヤー (走る棒人間)
         this.createPlayerTexture();
+        this.createBasicTextures();
+    }
 
-        // 2. 地面 (少しサイバーな雰囲気)
+    createBasicTextures() {
+        // 地面
         const ground = this.make.graphics({x:0, y:0, add:false});
         ground.fillStyle(0x222222, 1);
         ground.fillRect(0, 0, 32, 32);
-        ground.lineStyle(2, 0x00ff00, 1); // ネオングリーン
+        ground.lineStyle(2, 0x00ff00, 1);
         ground.strokeRect(0, 0, 32, 32);
         ground.generateTexture('ground', 32, 32);
 
-        // 3. トゲ
+        // 崩れる床 (オレンジ)
+        const falling = this.make.graphics({x:0, y:0, add:false});
+        falling.fillStyle(0x553311, 1);
+        falling.fillRect(0, 0, 32, 32);
+        falling.lineStyle(2, 0xffaa00, 1);
+        falling.strokeRect(0, 0, 32, 32);
+        falling.beginPath(); falling.moveTo(5,5); falling.lineTo(15,15); falling.lineTo(10, 25); falling.strokePath();
+        falling.generateTexture('fallingPlatform', 32, 32);
+
+        // 移動する床 (水色)
+        const moving = this.make.graphics({x:0, y:0, add:false});
+        moving.fillStyle(0x003344, 1);
+        moving.fillRect(0, 0, 32, 32);
+        moving.lineStyle(2, 0x00ffff, 1);
+        moving.strokeRect(0, 0, 32, 32);
+        // 矢印模様
+        moving.lineStyle(2, 0x00ffff, 1);
+        moving.beginPath(); moving.moveTo(8, 16); moving.lineTo(24, 16); moving.lineTo(20, 12); moving.moveTo(24, 16); moving.lineTo(20, 20); moving.strokePath();
+        moving.generateTexture('movingPlatform', 32, 32);
+
+        // ジャンプパッド
+        const spring = this.make.graphics({x:0, y:0, add:false});
+        spring.fillStyle(0x444400, 1);
+        spring.fillRect(0, 0, 32, 32);
+        spring.lineStyle(2, 0xffff00, 1);
+        spring.strokeRect(0, 0, 32, 32);
+        spring.beginPath(); spring.moveTo(4, 28); spring.lineTo(16, 4); spring.lineTo(28, 28); spring.strokePath();
+        spring.generateTexture('jumpPad', 32, 32);
+
+        // コイン
+        const coin = this.make.graphics({x:0, y:0, add:false});
+        coin.fillStyle(0xffd700, 1);
+        coin.fillCircle(16, 16, 14);
+        coin.fillStyle(0xffaa00, 1);
+        coin.fillCircle(16, 16, 10);
+        coin.generateTexture('coin', 32, 32);
+
+        // トゲ、敵、壁粒子、星
         const spike = this.make.graphics({x:0, y:0, add:false});
         spike.fillStyle(0xff0055, 1);
-        spike.beginPath();
-        spike.moveTo(0, 32);
-        spike.lineTo(16, 0);
-        spike.lineTo(32, 32);
-        spike.fillPath();
+        spike.beginPath(); spike.moveTo(0, 32); spike.lineTo(16, 0); spike.lineTo(32, 32); spike.fillPath();
         spike.generateTexture('spike', 32, 32);
 
-        // 4. 動く敵 (パトロールする敵)
         const enemy = this.make.graphics({x:0, y:0, add:false});
-        enemy.fillStyle(0xaa00aa, 1); // 紫
+        enemy.fillStyle(0xaa00aa, 1);
         enemy.fillCircle(16, 16, 16);
         enemy.fillStyle(0xffffff, 1);
-        enemy.fillCircle(10, 10, 4); // 目
-        enemy.fillCircle(22, 10, 4);
+        enemy.fillCircle(10, 10, 4); enemy.fillCircle(22, 10, 4);
         enemy.generateTexture('enemy', 32, 32);
 
-        // 5. 死の壁のパーティクル用
         const p = this.make.graphics({x:0, y:0, add:false});
         p.fillStyle(0xff0000, 1);
         p.fillCircle(4, 4, 4);
         p.generateTexture('redParticle', 8, 8);
+
+        const star = this.make.graphics({x:0, y:0, add:false});
+        star.fillStyle(0xffffff, 1);
+        star.fillCircle(2, 2, 2);
+        star.generateTexture('star', 4, 4);
     }
 
     createPlayerTexture() {
-        // 走るアニメーション用テクスチャ2種
         [1, 2].forEach(i => {
             const g = this.make.graphics({x:0, y:0, add:false});
             g.lineStyle(3, 0xffffff, 1);
             g.fillStyle(0xffccaa, 1); 
-            // 頭
             g.fillCircle(16, 8, 7);
-            // 体
-            g.beginPath();
-            g.moveTo(16, 15);
-            g.lineTo(16, 30);
-            g.strokePath();
-            // 手足 (フレームで変える)
+            g.beginPath(); g.moveTo(16, 15); g.lineTo(16, 30); g.strokePath();
             g.beginPath();
             if(i===1) {
-                g.moveTo(16, 20); g.lineTo(6, 25);  // 左手
-                g.moveTo(16, 20); g.lineTo(26, 15); // 右手
-                g.moveTo(16, 30); g.lineTo(6, 40);  // 左足
-                g.moveTo(16, 30); g.lineTo(26, 35); // 右足
+                g.moveTo(16, 20); g.lineTo(6, 25); g.moveTo(16, 20); g.lineTo(26, 15);
+                g.moveTo(16, 30); g.lineTo(6, 40); g.moveTo(16, 30); g.lineTo(26, 35);
             } else {
-                g.moveTo(16, 20); g.lineTo(6, 15);
-                g.moveTo(16, 20); g.lineTo(26, 25);
-                g.moveTo(16, 30); g.lineTo(10, 35);
-                g.moveTo(16, 30); g.lineTo(22, 45);
+                g.moveTo(16, 20); g.lineTo(6, 15); g.moveTo(16, 20); g.lineTo(26, 25);
+                g.moveTo(16, 30); g.lineTo(10, 35); g.moveTo(16, 30); g.lineTo(22, 45);
             }
             g.strokePath();
             g.generateTexture(`player_run${i}`, 32, 48);
@@ -168,56 +191,53 @@ class MainScene extends Phaser.Scene {
     }
 
     create() {
-        // --- サウンド初期化 ---
         SoundManager.init();
-        // 初回クリックでAudioContextをResumeするイベント設定
         this.input.once('pointerdown', () => SoundManager.resume());
         this.input.keyboard.once('keydown', () => SoundManager.resume());
 
-        // --- 変数初期化 ---
         this.gameOver = false;
+        this.isStunned = false;
         this.nextSpawnX = 0;
         this.jumps = 0;
-        this.lastGroundY = 400; // 前の地面の高さを記録（無理な生成防止用）
-
-        // ハイスコア読み込み
+        this.lastGroundY = 400;
+        this.lastPlatformType = 0;
+        this.bonusScore = 0; // コインによる追加スコア
         this.highScore = parseInt(localStorage.getItem('phaser_run_highscore')) || 0;
+        
+        this.dangerOverlay = document.getElementById('danger-overlay');
+        this.dangerOverlay.style.opacity = 0;
 
-        // --- 背景 ---
-        this.cameras.main.setBackgroundColor('#101015'); // 暗い宇宙っぽい色
+        this.createBackgrounds();
 
-        // --- アニメーション ---
         this.anims.create({
             key: 'run',
             frames: [ { key: 'player_run1' }, { key: 'player_run2' } ],
-            frameRate: 8,
-            repeat: -1
+            frameRate: 8, repeat: -1
         });
 
-        // --- グループ ---
+        // --- グループ設定 ---
         this.platforms = this.physics.add.staticGroup();
         this.spikes = this.physics.add.staticGroup();
-        this.enemies = this.physics.add.group({
-            allowGravity: true,
-            immovable: false
-        });
+        this.fallingPlatforms = this.physics.add.group({ immovable: true, allowGravity: false });
+        this.movingPlatforms = this.physics.add.group({ immovable: true, allowGravity: false });
+        this.jumpPads = this.physics.add.staticGroup();
+        this.coins = this.physics.add.staticGroup(); // コイン
+        this.enemies = this.physics.add.group({ allowGravity: true, immovable: false });
 
-        // --- プレイヤー ---
+        // プレイヤー
         this.player = this.physics.add.sprite(100, 200, 'player_run1');
         this.player.play('run');
         this.player.setGravityY(CONFIG.GRAVITY);
-        this.player.body.setSize(20, 44); // 当たり判定調整
-        
-        // --- 死の壁（パーティクルエフェクト付き） ---
-        // 壁の実体（見えない壁として判定用）
+        this.player.body.setSize(20, 44);
+
+        // 死の壁
         this.deathWall = this.physics.add.image(CONFIG.WALL_START_X, 300, 'redParticle');
-        this.deathWall.setVisible(false); // 本体は見せない
+        this.deathWall.setVisible(false);
         this.deathWall.body.allowGravity = false;
         this.deathWall.setImmovable(true);
         this.deathWall.setVelocityX(CONFIG.WALL_SPEED);
-        this.deathWall.body.setSize(100, 2000); // 巨大な壁
+        this.deathWall.body.setSize(100, 2000);
 
-        // 壁の見た目（パーティクル）
         this.wallParticles = this.add.particles(0, 0, 'redParticle', {
             speed: { min: 100, max: 200 },
             angle: { min: -45, max: 45 },
@@ -231,25 +251,35 @@ class MainScene extends Phaser.Scene {
         });
         this.wallParticles.startFollow(this.deathWall);
 
-        // --- カメラ ---
+        // カメラ
         this.cameras.main.startFollow(this.player, true, 0.1, 0.1);
         this.cameras.main.setDeadzone(100, 0);
 
-        // --- 初期地形 ---
-        this.createGround(0, 1000, 400); // スタート地点
+        // 初期地形生成
+        this.createGround(0, 1000, 400); 
         this.nextSpawnX = 1000;
         this.lastGroundY = 400;
 
         // --- 衝突設定 ---
         this.physics.add.collider(this.player, this.platforms, this.resetJumpCount, null, this);
-        this.physics.add.collider(this.enemies, this.platforms); // 敵も地面に乗る
+        this.physics.add.collider(this.enemies, this.platforms);
+        this.physics.add.collider(this.enemies, this.fallingPlatforms);
+        this.physics.add.collider(this.enemies, this.movingPlatforms); // 敵も移動床に乗る
+        
+        // ギミック
+        this.physics.add.collider(this.player, this.fallingPlatforms, this.activateFallingPlatform, null, this);
+        this.physics.add.collider(this.player, this.movingPlatforms, this.rideMovingPlatform, null, this);
+        this.physics.add.collider(this.player, this.jumpPads, this.activateJumpPad, null, this);
+        
+        // コイン
+        this.physics.add.overlap(this.player, this.coins, this.collectCoin, null, this);
 
-        // 死亡判定
-        this.physics.add.overlap(this.player, this.deathWall, this.hitTraps, null, this);
-        this.physics.add.collider(this.player, this.spikes, this.hitTraps, null, this);
-        this.physics.add.overlap(this.player, this.enemies, this.hitTraps, null, this);
+        // ダメージ判定
+        this.physics.add.collider(this.player, this.spikes, this.hitObstacle, null, this);
+        this.physics.add.overlap(this.player, this.enemies, this.hitObstacle, null, this);
+        this.physics.add.overlap(this.player, this.deathWall, this.hitDeathWall, null, this);
 
-        // --- UI ---
+        // UI
         this.scoreText = this.add.text(16, 16, 'DIST: 0m', {
             fontSize: '20px', fill: '#fff', stroke: '#000', strokeThickness: 4
         }).setScrollFactor(0).setDepth(100);
@@ -262,66 +292,98 @@ class MainScene extends Phaser.Scene {
             fontSize: '40px', fill: '#ff0000', stroke: '#fff', strokeThickness: 6, align: 'center'
         }).setOrigin(0.5).setScrollFactor(0).setDepth(100);
 
-        // --- 入力 ---
+        this.distanceText = this.add.text(400, 100, '', {
+            fontSize: '24px', fill: '#ff5555', stroke: '#000', strokeThickness: 4
+        }).setOrigin(0.5).setScrollFactor(0).setDepth(100);
+
+        // 入力
         this.input.on('pointerdown', this.jump, this);
         this.input.on('pointerup', this.cutJump, this);
         this.input.keyboard.on('keydown-SPACE', this.jump, this);
         this.input.keyboard.on('keyup-SPACE', this.cutJump, this);
     }
 
+    createBackgrounds() {
+        const starTexture = this.make.graphics({x:0, y:0, add:false});
+        starTexture.fillStyle(0xffffff, 1);
+        for(let i=0; i<100; i++) starTexture.fillCircle(Math.random()*512, Math.random()*512, Math.random()*2+1);
+        starTexture.generateTexture('starfield', 512, 512);
+
+        this.bgFar = this.add.tileSprite(0, 0, 800, 600, 'starfield').setOrigin(0, 0).setScrollFactor(0).setAlpha(0.5);
+        this.bgNear = this.add.tileSprite(0, 0, 800, 600, 'starfield').setOrigin(0, 0).setScrollFactor(0).setAlpha(0.8);
+        this.bgNear.tileScaleX = 1.5; this.bgNear.tileScaleY = 1.5;
+    }
+
     update() {
         if (this.gameOver) return;
 
-        // プレイヤー移動
-        this.player.setVelocityX(CONFIG.PLAYER_SPEED);
         // 壁移動
         this.deathWall.setVelocityX(CONFIG.WALL_SPEED);
 
-        // 天井に頭をぶつけた時の修正
-        // ブロックされた瞬間、上昇速度を殺す（「頭ぶつけても飛べる」対策）
-        if (this.player.body.blocked.up) {
-            this.player.setVelocityY(100); // 少し跳ね返る
+        // プレイヤー移動
+        if (!this.isStunned) {
+            this.player.setVelocityX(CONFIG.PLAYER_SPEED);
+            this.player.setTint(0xffffff);
+        } else {
+            if (this.player.body.touching.down) this.player.setDragX(1000);
+            else this.player.setDragX(100);
         }
 
-        // 敵の移動ロジック
-        this.enemies.children.iterate((enemy) => {
-            if (enemy) {
-                // 足場から落ちそうになったら反転
-                // 簡易実装: 一定距離で往復させる
-                if (enemy.body.blocked.left) {
-                    enemy.setVelocityX(100);
-                } else if (enemy.body.blocked.right) {
-                    enemy.setVelocityX(-100);
-                }
-                // 足場端でのターン（レイキャストがないので、生成時に移動範囲を決める方が安全だが簡易的に）
-                // ここではシンプルに生成時に速度を与え、壁に当たると反転するようにしています
+        // 壁との距離演出
+        const distToWall = this.player.x - this.deathWall.x;
+        this.distanceText.setText(distToWall < 800 ? `DANGER! WALL: ${Math.floor(distToWall)}m` : '');
+        if (distToWall < 500) {
+            const opacity = 1 - (distToWall / 500);
+            this.dangerOverlay.style.opacity = Math.min(opacity, 0.6);
+        } else {
+            this.dangerOverlay.style.opacity = 0;
+        }
+
+        // 背景
+        const scrollX = this.cameras.main.scrollX;
+        this.bgFar.tilePositionX = scrollX * 0.1;
+        this.bgNear.tilePositionX = scrollX * 0.5;
+
+        // 頭ぶつけ
+        if (this.player.body.blocked.up) this.player.setVelocityY(100);
+
+        // 移動床のロジック
+        this.movingPlatforms.children.iterate((plat) => {
+            if (plat) {
+                // 初期位置(startX)を中心に、範囲内を往復する
+                if (plat.x >= plat.startX + plat.moveRange) plat.setVelocityX(-100);
+                else if (plat.x <= plat.startX - plat.moveRange) plat.setVelocityX(100);
             }
         });
 
-        // 地形生成
+        // 敵AI
+        this.enemies.children.iterate((enemy) => {
+            if (enemy) {
+                if (enemy.body.blocked.left) enemy.setVelocityX(100);
+                else if (enemy.body.blocked.right) enemy.setVelocityX(-100);
+            }
+        });
+
+        // 地形生成 (whileループで確実に埋める)
         const cameraRight = this.cameras.main.scrollX + this.cameras.main.width;
-        if (this.nextSpawnX < cameraRight + CONFIG.SPAWN_BUFFER) {
+        while (this.nextSpawnX < cameraRight + CONFIG.SPAWN_BUFFER) {
             this.generateLevelChunk();
         }
 
         // 落下死
         if (this.player.y > this.sys.canvas.height + 200) {
-            this.hitTraps();
+            this.hitDeathWall();
         }
 
-        // スコア更新
-        const currentDist = Math.floor(this.player.x / 10);
-        this.scoreText.setText(`DIST: ${currentDist}m`);
-
+        // スコア更新 (距離 + ボーナス)
+        const currentScore = Math.floor(this.player.x / 10) + this.bonusScore;
+        this.scoreText.setText(`SCORE: ${currentScore}`);
         this.cleanupObjects();
     }
 
     jump() {
-        if (this.gameOver) return;
+        if (this.gameOver || this.isStunned) return;
         SoundManager.resume();
-
-        // 接地している or 2段ジャンプ権がある
-        // かつ、頭をぶつけている最中ではない（blocked.upチェック）
         if ((this.player.body.touching.down || this.jumps < 2) && !this.player.body.blocked.up) {
             this.player.setVelocityY(-CONFIG.JUMP_POWER);
             this.jumps++;
@@ -330,7 +392,6 @@ class MainScene extends Phaser.Scene {
     }
 
     cutJump() {
-        // ジャンプ上昇中にボタンを離したら減速
         if (this.player.body.velocity.y < 0) {
             this.player.setVelocityY(this.player.body.velocity.y * 0.5);
         }
@@ -340,59 +401,182 @@ class MainScene extends Phaser.Scene {
         this.jumps = 0;
     }
 
+    // 移動床に乗った時の処理
+    rideMovingPlatform(player, platform) {
+        if (player.body.touching.down && platform.body.touching.up) {
+            this.resetJumpCount();
+            // 移動床の上にいる間、床の速度を加算（簡易的な摩擦表現）
+            // Updateループで厳密にやるより、ここで少し補正する程度が遊びやすい
+            player.x += platform.body.velocity.x * 0.015; 
+        }
+    }
+
+    activateFallingPlatform(player, platform) {
+        if (player.body.touching.down && platform.body.touching.up) {
+            if (!platform.isFalling) {
+                platform.isFalling = true;
+                SoundManager.playCrumble();
+                this.tweens.add({
+                    targets: platform, x: platform.x + 5, duration: 50, yoyo: true, repeat: 10,
+                    onComplete: () => {
+                        platform.body.setAllowGravity(true);
+                        platform.body.setImmovable(false);
+                    }
+                });
+            }
+            this.resetJumpCount();
+        }
+    }
+
+    activateJumpPad(player, pad) {
+        if (player.body.touching.down && pad.body.touching.up) {
+            SoundManager.playSpring();
+            player.setVelocityY(-CONFIG.HIGH_JUMP_POWER);
+            this.jumps = 1; 
+            this.tweens.add({ targets: pad, scaleY: 0.5, y: pad.y + 8, duration: 50, yoyo: true });
+        }
+    }
+
+    collectCoin(player, coin) {
+        coin.disableBody(true, true); // 消す
+        SoundManager.playCoin();
+        this.bonusScore += 50; // 500m分の価値
+        
+        // スコア表示演出（ポップアップ）
+        const popup = this.add.text(coin.x, coin.y, '+50', { fontSize: '24px', fill: '#ffff00', stroke:'#000', strokeThickness:3 });
+        this.tweens.add({ targets: popup, y: coin.y - 50, alpha: 0, duration: 800, onComplete: () => popup.destroy() });
+    }
+
+    hitObstacle(player, obstacle) {
+        if (this.isStunned || this.gameOver) return;
+        this.isStunned = true;
+        SoundManager.playDamage();
+        player.setVelocity(-300, -300);
+        player.setTint(0xff5555); 
+        player.anims.stop();
+        this.time.delayedCall(CONFIG.STUN_TIME, () => {
+            if (this.gameOver) return;
+            this.isStunned = false;
+            player.clearTint();
+            player.play('run');
+        });
+    }
+
+    hitDeathWall(player, wall) {
+        if (this.gameOver) return;
+        this.gameOver = true;
+        this.dangerOverlay.style.opacity = 0;
+        SoundManager.playGameOver();
+
+        this.player.setTint(0x333333);
+        this.player.anims.stop();
+        this.player.setVelocity(0, 0);
+        this.physics.pause();
+        this.deathWall.setVelocity(0);
+        this.wallParticles.pause();
+
+        const currentScore = Math.floor(this.player.x / 10) + this.bonusScore;
+        if (currentScore > this.highScore) {
+            this.highScore = currentScore;
+            localStorage.setItem('phaser_run_highscore', this.highScore);
+            this.statusText.setText(`NEW RECORD!\n${currentScore}\n\nTap to Restart`);
+        } else {
+            this.statusText.setText(`GAME OVER\nSCORE: ${currentScore}\n\nTap to Restart`);
+        }
+        
+        this.time.delayedCall(1000, () => {
+            this.input.once('pointerdown', () => this.scene.restart());
+            this.input.keyboard.once('keydown-SPACE', () => this.scene.restart());
+        });
+    }
+
     generateLevelChunk() {
         const dist = this.player.x;
-        let difficulty = 0; // 0:Easy, 1:Normal, 2:Hard
+        let difficulty = 0; 
         if (dist > 5000) difficulty = 2;
         else if (dist > 2000) difficulty = 1;
 
-        // --- 高さの決定ロジック（無理な地形防止） ---
-        // ジャンプ力から計算した到達可能高さは約150px程度（2段ジャンプ込みだともっといけるが、安全策を取る）
-        const maxUp = 120; 
-        const maxDown = 300; // 下りる分にはある程度深くてもOK
+        // 高さ制限: 常に画面内に収める (150-500)
+        // どんなに前の地形が変でも、次は必ず画面内に作る
+        const minY = 150; 
+        const maxY = 550; // 少し下げた
         
-        // 画面外に出ない範囲で制限
-        const minY = 150;
-        const maxY = 500;
+        // 前回の床タイプに応じた調整
+        let maxUp = 120;
+        let maxDown = 300;
+        
+        // 崩れる床の後は上り坂禁止
+        if (this.lastPlatformType === 1) maxUp = -50; 
+
+        // 安全なY座標計算
+        // lastGroundY自体が画面外になっている場合も考慮してクランプ
+        this.lastGroundY = Phaser.Math.Clamp(this.lastGroundY, minY, maxY);
 
         let minTarget = Math.max(minY, this.lastGroundY - maxUp);
         let maxTarget = Math.min(maxY, this.lastGroundY + maxDown);
-        
         let y = Phaser.Math.Between(minTarget, maxTarget);
         
-        // 幅
+        // 幅決定
         let width = Phaser.Math.Between(300, 800);
-        if (difficulty > 1) width = Phaser.Math.Between(200, 600); // 難易度高いと足場が狭い
+        if (difficulty > 1) width = Phaser.Math.Between(200, 600);
 
-        // 穴のサイズ（前の足場との高低差を考慮）
+        // ギャップ決定
         let gap = 0;
         if (difficulty > 0) {
-            // 前の足場より高い位置に行くなら、穴は小さくしないと届かない
-            const heightDiff = this.lastGroundY - y; // 正なら登り
+            const heightDiff = this.lastGroundY - y; 
             let maxGap = 200;
-            if (heightDiff > 50) maxGap = 120; // かなり登るなら穴は狭く
-            if (heightDiff > 100) maxGap = 80; // 急勾配
+            if (heightDiff > 50) maxGap = 120;
+            if (heightDiff > 100) maxGap = 80; 
+            if (heightDiff > 130) maxGap = 40;
+            if (this.lastPlatformType === 1) maxGap = 120; // 崩れる床後は狭く
             
             gap = Phaser.Math.Between(60, maxGap);
         }
 
-        // 生成
-        this.createGround(this.nextSpawnX, width, y);
-        this.lastGroundY = y; // 更新
-
-        // ギミック配置
+        // タイプ決定 (0:Normal, 1:Falling, 2:JumpPad, 3:Moving)
+        let platformType = 0;
+        const rand = Math.random();
+        
         if (difficulty > 0) {
-            const seed = Math.random();
-            // トゲ配置
-            if (seed < 0.4) {
-                this.createSpikes(this.nextSpawnX, width, y);
-            }
-            // 動く敵配置 (Normal以上かつ、足場がそこそこ広い場合)
-            else if (seed > 0.7 && width > 300) {
-                this.createEnemy(this.nextSpawnX, width, y);
-            }
+            if (rand < 0.20) platformType = 1;      // 崩れる床
+            else if (rand < 0.30) platformType = 2; // ジャンプパッド
+            else if (rand < 0.45) platformType = 3; // 移動床 (NEW)
         }
 
+        // 生成処理
+        if (platformType === 1) {
+            // 崩れる床
+            width = Phaser.Math.Between(150, 320);
+            this.createFallingPlatform(this.nextSpawnX, width, y);
+            this.lastGroundY = y;
+        } 
+        else if (platformType === 2) {
+            // ジャンプパッド
+            // パッドを使った後の着地地点を予測して lastGroundY を更新したいが
+            // シンプルに「パッドがある床」を作る
+            // ただし、パッドの後に極端な生成をしないように調整
+            this.createGround(this.nextSpawnX, width, y);
+            this.createJumpPad(this.nextSpawnX + width/2, y);
+            
+            // パッドを踏むと高く飛ぶので、次回の生成基準（lastGroundY）を高く設定しておく手もあるが
+            // 逆に「パッドを使わなかった場合」に詰むので、基準はyのままにする
+            // その代わり、次の生成時に画面外にならないよう冒頭でClampしている
+            this.lastGroundY = y;
+        }
+        else if (platformType === 3) {
+            // 移動床
+            width = Phaser.Math.Between(100, 200); // 移動床は短め
+            this.createMovingPlatform(this.nextSpawnX, width, y);
+            this.lastGroundY = y;
+        }
+        else {
+            // 通常床
+            this.createGround(this.nextSpawnX, width, y);
+            this.addGimmicks(this.nextSpawnX, width, y, difficulty);
+            this.lastGroundY = y;
+        }
+        
+        this.lastPlatformType = platformType;
         this.nextSpawnX += width + gap;
     }
 
@@ -401,6 +585,49 @@ class MainScene extends Phaser.Scene {
         ground.displayWidth = width;
         ground.displayHeight = 32;
         ground.refreshBody();
+    }
+
+    createFallingPlatform(startX, width, y) {
+        const plat = this.fallingPlatforms.create(startX + width / 2, y + 16, 'fallingPlatform');
+        plat.displayWidth = width;
+        plat.displayHeight = 32;
+        plat.isFalling = false;
+        plat.body.updateFromGameObject(); 
+    }
+
+    createMovingPlatform(startX, width, y) {
+        const plat = this.movingPlatforms.create(startX + width / 2, y + 16, 'movingPlatform');
+        plat.displayWidth = width;
+        plat.displayHeight = 32;
+        plat.body.updateFromGameObject();
+        plat.startX = startX + width / 2;
+        plat.moveRange = 100; // 移動範囲
+        plat.setVelocityX(100); // 初期速度
+    }
+
+    createJumpPad(x, y) {
+        const pad = this.jumpPads.create(x, y - 16, 'jumpPad');
+        pad.body.setSize(32, 32);
+        pad.body.setOffset(0, 0);
+    }
+
+    addGimmicks(startX, width, y, difficulty) {
+        // コイン配置 (全難易度)
+        if (Math.random() < 0.3) {
+            // ジャンプして届く位置に配置
+            const coinX = Phaser.Math.Between(startX + 20, startX + width - 20);
+            const coinY = y - Phaser.Math.Between(80, 180); 
+            this.coins.create(coinX, coinY, 'coin');
+        }
+
+        if (difficulty === 0) return;
+        
+        const seed = Math.random();
+        if (seed < 0.4) {
+            this.createSpikes(startX, width, y);
+        } else if (seed > 0.7 && width > 300) {
+            this.createEnemy(startX, width, y);
+        }
     }
 
     createSpikes(startX, width, y) {
@@ -416,56 +643,19 @@ class MainScene extends Phaser.Scene {
         const enemy = this.enemies.create(ex, y - 32, 'enemy');
         enemy.setBounce(1);
         enemy.setCollideWorldBounds(false);
-        enemy.setVelocityX(100); // 初期速度
+        enemy.setVelocityX(100);
         enemy.setGravityY(CONFIG.GRAVITY);
-        
-        // 敵の移動範囲を制限するためのカスタムプロパティ（簡易AI用）
-        enemy.startX = startX;
-        enemy.endX = startX + width;
-        
-        // Updateループ内で制御するためにイベントリスナーっぽく処理を追加
-        // PhaserのPhysics Group updateを使う手もあるが、今回はMainScene.updateで処理
     }
 
     cleanupObjects() {
         const killLine = this.cameras.main.scrollX - 1000;
-        const groups = [this.platforms, this.spikes, this.enemies];
-        
+        const groups = [this.platforms, this.spikes, this.enemies, this.fallingPlatforms, this.jumpPads, this.coins, this.movingPlatforms];
         groups.forEach(group => {
             group.children.iterate(child => {
-                if (child && child.x < killLine) {
+                if (child && (child.x < killLine || child.y > this.sys.canvas.height + 200)) {
                     child.destroy();
                 }
             });
-        });
-    }
-
-    hitTraps() {
-        if (this.gameOver) return;
-
-        this.gameOver = true;
-        SoundManager.playDamage(); // 音を鳴らす
-
-        this.player.setTint(0x555555);
-        this.player.anims.stop();
-        this.player.setVelocity(0, -200); // 少し浮いて倒れる演出
-        this.physics.pause();
-        this.deathWall.setVelocity(0);
-        this.wallParticles.pause(); // パーティクル停止
-
-        // ハイスコア保存
-        const currentDist = Math.floor(this.player.x / 10);
-        if (currentDist > this.highScore) {
-            this.highScore = currentDist;
-            localStorage.setItem('phaser_run_highscore', this.highScore);
-            this.statusText.setText(`NEW RECORD!\n${currentDist}m\n\nTap to Restart`);
-        } else {
-            this.statusText.setText(`GAME OVER\nSCORE: ${currentDist}m\n\nTap to Restart`);
-        }
-        
-        this.time.delayedCall(800, () => {
-            this.input.once('pointerdown', () => this.scene.restart());
-            this.input.keyboard.once('keydown-SPACE', () => this.scene.restart());
         });
     }
 }
